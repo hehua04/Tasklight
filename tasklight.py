@@ -334,7 +334,7 @@ class App:
 
     def visible(self):
         fs = self.filter_str.strip().lower()
-        rows = self.procs
+        rows = [r for r in self.procs if r.pid != 0]
         if fs:
             if "*" in fs or "?" in fs:
                 rows = [r for r in rows if fnmatch.fnmatch(r.name.lower(), fs)]
