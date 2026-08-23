@@ -26,6 +26,8 @@ import argparse
 import ctypes
 import ctypes.wintypes as wt
 import fnmatch
+import math
+import re
 import shutil
 import sys
 import threading
@@ -47,8 +49,10 @@ except ImportError:
 
 VERSION = "0.1.0"
 
-_k32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
-_psapi = ctypes.WinDLL("psapi.dll", use_last_error=True)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+_k32 = ctypes.WinDLL("kernel32.dll")
+_psapi = ctypes.WinDLL("psapi.dll")
 
 
 class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
@@ -119,7 +123,7 @@ def setup_console():
         _k32.SetConsoleCP(65001)
         h = _k32.GetStdHandle(wt.STD_OUTPUT_HANDLE)
         mode = wt.DWORD()
-        if h and _k32.GetConsoleMode(h, ctypes.byref(mode)):
+        if h and h != -1 and _k32.GetConsoleMode(h, ctypes.byref(mode)):
             _k32.SetConsoleMode(h, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
     except Exception:
         pass
@@ -127,12 +131,13 @@ def setup_console():
 
 def dw(s: str) -> int:
     w = 0
-    for ch in s:
+    for ch in _ANSI_RE.sub("", s):
         w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
     return w
 
 
 def cut(s: str, width: int) -> str:
+    s = _ANSI_RE.sub("", s)
     out, w = [], 0
     for ch in s.replace("\t", " "):
         cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
@@ -174,6 +179,14 @@ class Proc(NamedTuple):
     rss: int
     commit: int | None
     threads: int | None
+
+
+class Snap(NamedTuple):
+    procs: list
+    sys_cpu: float
+    mem: object
+    commit_used: int
+    commit_limit: int
 
 
 SORT_KEYS = ["cpu", "mem", "commit", "name", "pid"]
@@ -247,14 +260,14 @@ def read_key(timeout: float):
 
 class App:
     def __init__(self, args):
-        self.interval = max(0.5, min(args.interval, 30.0))
+        iv = args.interval
+        self.interval = max(0.5, min(iv, 30.0)) if math.isfinite(iv) else 2.0
         self.sort_key = args.sort
         self.reverse = args.sort not in ("name", "pid")
         self.filter_str = args.filter or ""
         self.filter_mode = False
         self.plain = args.plain or not sys.stdout.isatty()
         self.once = args.once
-        self.procs: list[Proc] = []
         self.selected_pid = None
         self.offset = 0
         self.detail_lines = None
@@ -263,12 +276,31 @@ class App:
         self.msg = ""
         self.msg_until = 0.0
         self.ncpu = psutil.cpu_count(True) or 1
-        self.sys_cpu = 0.0
-        self.mem = psutil.virtual_memory()
-        self.commit_used, self.commit_limit = get_commit_charge()
+        cu, cl = get_commit_charge()
+        self._snap = Snap([], 0.0, psutil.virtual_memory(), cu, cl)
         self.version = 0
         self._stop_evt = threading.Event()
         self._wake_evt = threading.Event()
+
+    @property
+    def procs(self):
+        return self._snap.procs
+
+    @property
+    def sys_cpu(self):
+        return self._snap.sys_cpu
+
+    @property
+    def mem(self):
+        return self._snap.mem
+
+    @property
+    def commit_used(self):
+        return self._snap.commit_used
+
+    @property
+    def commit_limit(self):
+        return self._snap.commit_limit
 
     def set_msg(self, text, ttl=3.5):
         self.msg = text
@@ -315,16 +347,13 @@ class App:
         return procs, sys_cpu, vm, cu, cl
 
     def snapshot(self):
-        (self.procs, self.sys_cpu,
-         self.mem, self.commit_used, self.commit_limit) = self._collect()
+        self._snap = Snap(*self._collect())
 
     def sampler(self):
-        self.prime()
         while not self._stop_evt.is_set():
             t0 = time.monotonic()
             try:
-                (self.procs, self.sys_cpu,
-                 self.mem, self.commit_used, self.commit_limit) = self._collect()
+                self._snap = Snap(*self._collect())
                 self.version += 1
             except Exception:
                 pass
@@ -369,6 +398,8 @@ class App:
         self.selected_pid = rows[idx].pid
 
     def set_sort(self, key):
+        if key not in SORT_KEYS:
+            return
         self.sort_key = key
         self.reverse = key not in ("name", "pid")
 
@@ -517,7 +548,9 @@ class App:
         rows = self.visible()
         name_w = max(W - 47, 12)
         idx = self.sel_index(rows)
-        if idx >= 0:
+        if not rows:
+            self.offset = 0
+        elif idx >= 0:
             if idx < self.offset:
                 self.offset = idx
             elif idx >= self.offset + body_h:
@@ -528,7 +561,8 @@ class App:
         for r in rows[self.offset:self.offset + body_h]:
             selected = (r.pid == self.selected_pid)
             lines.append(self.row_line(r, name_w, selected))
-        for _ in range(body_h - min(len(rows) - self.offset, body_h)):
+        shown = min(len(rows) - self.offset, body_h)
+        for _ in range(max(body_h - shown, 0)):
             lines.append(" " * W)
         lines.append(self.help_line(W))
         return lines[:H]
@@ -537,7 +571,7 @@ class App:
         W, H = shutil.get_terminal_size((120, 32))
         lines = self.build_frame(W, H)
         if self.plain:
-            sys.stdout.write("\n".join(l for l in lines) + "\n")
+            sys.stdout.write("\n".join(_ANSI_RE.sub("", l).rstrip() for l in lines) + "\n")
             sys.stdout.flush()
         else:
             frame = RESET + "\x1b[K\r\n".join(lines) + RESET + "\x1b[K\x1b[J"
@@ -633,6 +667,7 @@ def parse_args():
     ap.add_argument("--once", action="store_true", help="输出一帧后退出(适合脚本)")
     ap.add_argument("--plain", action="store_true",
                     help="禁用 ANSI 颜色与整屏模式(重定向或旧终端时使用)")
+    ap.add_argument("--version", action="version", version=f"TaskLight {VERSION}")
     return ap.parse_args()
 
 
@@ -645,7 +680,7 @@ def main():
     try:
         app.prime()
         if app.once:
-            time.sleep(min(max(app.interval / 4, 0.3), 1.5))
+            time.sleep(min(max(app.interval / 4, 0.5), 1.5))
             app.snapshot()
             app.render()
         else:
