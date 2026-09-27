@@ -374,13 +374,28 @@ SORT_LABELS = {
 }
 KEY_TO_SORT = {"c": "cpu", "m": "mem", "p": "commit", "i": "pid", "n": "name"}
 COLS = [
-    ("pid", "PID", 7, "right"),
+    ("pid", "PID", 8, "right"),
     ("name", "名称", 0, "left"),
     ("cpu", "CPU%", 7, "right"),
     ("mem", "内存(WS)", 10, "right"),
     ("commit", "提交", 10, "right"),
     ("threads", "线程", 6, "right"),
 ]
+
+# 除"名称"外的列宽之和. 名称列宽随终端宽度伸缩, 由它反推:
+#   name_w = W - COL_OTHER
+# COL_OTHER = 其余各列宽之和 + 列间分隔空格数(6 列共 5 个).
+# 表头与数据行都按同一组列宽渲染, 因此两者总宽一致 (均等于 W).
+COL_FIXED = sum(w for _k, _l, w, _a in COLS if w)
+COL_SEP = len(COLS) - 1
+COL_OTHER = COL_FIXED + COL_SEP
+MIN_NAME_W = 12
+
+
+def name_col_width(total_width: int) -> int:
+    """给定终端宽度, 计算名称列宽。表头与数据行必须共用, 否则两者会不等宽。"""
+    return max(total_width - COL_OTHER, MIN_NAME_W)
+
 
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
@@ -707,9 +722,10 @@ class App:
         return fit(line, W)
 
     def header_line(self, rows_n, W):
+        name_w = name_col_width(W)
         cells = []
         for key, label, width, align in COLS:
-            w = width if width else max(W - 47, 12)
+            w = width if width else name_w
             lab = label + (" ↓" if key == self.sort_key and self.reverse else
                            " ↑" if key == self.sort_key else "")
             cells.append(fit(lab, w, align))
@@ -724,21 +740,24 @@ class App:
         cpu_s = f"{r.cpu:.1f}"
         cc = BOLD + RED if r.cpu >= 80 else (BOLD + YEL if r.cpu >= 40 else "")
         memc = BOLD + YEL if r.rss >= (1 << 30) else ""
+        # 列宽必须与 header_line 取自同一处 (COLS), 否则表头与数据行会不等宽
+        width = {key: (w if w else name_w) for key, _l, w, _a in COLS}
         cells = [
-            fit(r.pid, 7, "right"),
-            fit(r.name, name_w),
-            fit(cpu_s, 7, "right"),
-            fit(fmt_bytes(r.rss), 10, "right"),
-            fit(fmt_bytes(r.commit), 10, "right"),
-            fit("-" if r.threads is None else r.threads, 6, "right"),
+            fit(r.pid, width["pid"], "right"),
+            fit(r.name, width["name"]),
+            fit(cpu_s, width["cpu"], "right"),
+            fit(fmt_bytes(r.rss), width["mem"], "right"),
+            fit(fmt_bytes(r.commit), width["commit"], "right"),
+            fit("-" if r.threads is None else r.threads, width["threads"], "right"),
         ]
         colors = ["", "", cc, memc, memc, DIM]
         if selected:
-            return REV + "".join(cells) + RESET
+            return REV + " ".join(cells) + RESET
         out = []
         for cell, color in zip(cells, colors):
             out.append(color + cell + RESET if color else cell)
-        return "".join(out)
+        # 与 header_line 一样用空格分隔各列, 否则数据行会比表头短 (列会错位)
+        return " ".join(out)
 
     def help_line(self, W):
         if self.filter_mode:
@@ -775,7 +794,7 @@ class App:
 
         body_h = max(H - 3, 3)
         rows = self.visible()
-        name_w = max(W - 47, 12)
+        name_w = name_col_width(W)
         idx = self.sel_index(rows)
         if not rows:
             self.offset = 0

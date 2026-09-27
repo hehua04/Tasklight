@@ -52,23 +52,12 @@ n_thr = sum(1 for r in snap.procs if r.threads is not None)
 # 是否采集成功, 否则会随系统内存压力随机变红。改用"字段是否取到"来判断。
 n_fields = sum(1 for r in snap.procs
                if r.commit is not None and r.threads is not None and r.rss >= 0)
-n_live = sum(1 for r in snap.procs if r.rss > 0)
-# 硬编码快照会随内存压力漂移, 因此用"psutil 也认为非 0"的进程数作为参照
-import psutil as _ps
-_ref_nonzero = set()
-for _p in _ps.process_iter(attrs=("pid", "memory_info")):
-    try:
-        if _p.info["memory_info"] and _p.info["memory_info"].rss > 0:
-            _ref_nonzero.add(_p.info["pid"])
-    except Exception:
-        pass
-_expected = sum(1 for r in snap.procs if r.pid in _ref_nonzero)
 check("commit 列填充率 > 95%", n_commit > n * 0.95, f"{n_commit}/{n}")
 check("线程列填充率 > 95%", n_thr > n * 0.95, f"{n_thr}/{n}")
 check("三字段均取到的进程 > 95%", n_fields > n * 0.95, f"{n_fields}/{n}")
-# 我们的非零工作集进程数不应少于 psutil 认为非零的数量(允许少量进程中途退出)
-check("非零工作集进程数与 psutil 一致", n_live >= _expected - 5,
-      f"本方案 {n_live} / psutil 参照 {_expected}")
+# 注意: 不能拿"工作集非 0 的进程数"与 psutil 比 —— 完全换出的进程工作集就是 0,
+# 且会随内存压力在两次采样之间来回变化, 这种比较必然随机变红。
+# 工作集口径的正确性由下面的"逐进程交替测量"来保证。
 check("PID 0 不出现在可见列表",
       all(r.pid != 0 for r in a.visible()), "")
 
@@ -96,6 +85,29 @@ if _devs:
           f"n={len(_devs)} 中位 {_med*100:.1f}% p95 {_p95*100:.1f}%")
 else:
     check("工作集与 psutil 口径一致(中位偏差<10%)", False, "没有可比样本")
+
+print()
+print("=" * 62)
+print("3b. 表格布局 (表头与数据行必须等宽对齐)")
+print("=" * 62)
+# 这两条断言守的是实际踩过的坑: row_line 曾用固定列宽且不用空格分隔各列,
+# 导致数据行比表头短、PID 与进程名粘连。
+_layout_fail = []
+for _W in (60, 80, 100, 113, 120, 160):
+    _nw = T.name_col_width(_W)
+    _hdr = a.header_line(len(snap.procs), _W)
+    _row = a.row_line(snap.procs[0], _nw, False)
+    _hw, _rw = T.dw(_hdr), T.dw(_row)
+    if _hw != _rw:
+        _layout_fail.append(f"W={_W} 表头{_hw}≠数据{_rw}")
+    _pid_w = T.COLS[0][2]
+    if len(_row) > _pid_w and _row[_pid_w] != " ":
+        _layout_fail.append(f"W={_W} PID与名称粘连")
+check("表头与数据行等宽且列分隔正确", not _layout_fail,
+      "; ".join(_layout_fail) if _layout_fail else "6 种宽度全部对齐")
+check("表头宽度等于终端宽度", all(
+    T.dw(a.header_line(len(snap.procs), w)) == w for w in (80, 100, 113, 120)),
+    "80/100/113/120 均为满宽")
 
 print()
 print("=" * 62)
