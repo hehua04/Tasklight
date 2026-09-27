@@ -4,14 +4,14 @@
 可按 CPU / 内存（工作集）/ 已提交内存 等排序浏览全部进程，并支持筛选、查看详情与结束进程。
 
 ```
-TaskLight v0.2.0 │ 进程 401 │ CPU 2.2% │ 内存 10.1GB/15.2GB(66%) │ 提交 27.0GB/33.3GB
-     PID 名称                                              CPU% 内存(WS) ↓       提交   线程
-    4900 Memory Compression                                 0.0    660.3MB      9.3MB     70
-   50396 msedge.exe                                         0.0    490.5MB    717.8MB     30
-    4864 node.exe                                           0.0    361.0MB    632.1MB     14
-   21740 msedge.exe                                         0.0    313.9MB    327.3MB     32
-   32668 Grammarly.Desktop.exe                              0.0    241.5MB    419.4MB    105
-    6172 avp.exe                                            0.0    203.4MB    400.2MB    140
+TaskLight v0.2.0 │ 进程 399 │ CPU 18.5% │ 内存 10.1GB/15.2GB(67%) │ 提交 27.2GB/33.3GB
+     PID 名称                                             CPU% 内存(WS) ↓       提交   线程
+    4900 Memory Compression                                0.0    548.1MB      9.3MB     70
+   42920 msedge.exe                                        4.0    495.7MB    544.1MB     28
+   17664 msedge.exe                                        1.6    374.9MB    944.0MB    121
+    4864 node.exe                                          0.2    348.9MB    641.0MB     14
+    6172 avp.exe                                           0.0    235.1MB    429.2MB    143
+   15104 explorer.exe                                      0.0    224.2MB    349.1MB    176
   ...
 [↑↓]选择 [Enter]详情 [c/m/p/i/n]排序 [Tab]轮换 [a]升降序 [f]筛选 [k]结束 [空格]刷新 [+/-]间隔 [q]退出
 ```

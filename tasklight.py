@@ -391,10 +391,21 @@ COL_SEP = len(COLS) - 1
 COL_OTHER = COL_FIXED + COL_SEP
 MIN_NAME_W = 12
 
+# 右侧安全列: 不要把内容正好铺到终端最后一列。
+# 否则最后那个字符会落在末列上, 紧随其后的 \r\n 触发自动换行并把它冲掉 ——
+# 表现为最右一列"永远少一个字"(例如表头只剩"线"), 而且拉宽窗口也治不好,
+# 因为程序总会重新填满到边界。留 1 列即可规避。
+RIGHT_MARGIN = 1
+
+
+def safe_width(total_width: int) -> int:
+    """内容可用的总宽度 = 终端宽度减去右侧安全列 (见 RIGHT_MARGIN)。"""
+    return max(total_width - RIGHT_MARGIN, COL_OTHER + MIN_NAME_W)
+
 
 def name_col_width(total_width: int) -> int:
     """给定终端宽度, 计算名称列宽。表头与数据行必须共用, 否则两者会不等宽。"""
-    return max(total_width - COL_OTHER, MIN_NAME_W)
+    return max(safe_width(total_width) - COL_OTHER, MIN_NAME_W)
 
 
 RESET = "\x1b[0m"
@@ -719,7 +730,7 @@ class App:
             line = f"{BOLD}{RED}确认结束 PID {self.pending_kill[0]} ({self.pending_kill[1]})? y=确认 其他=取消{RESET}"
         elif self.msg and time.monotonic() < self.msg_until:
             line = f"{BOLD}{YEL}{self.msg}{RESET}"
-        return fit(line, W)
+        return fit(line, safe_width(W))
 
     def header_line(self, rows_n, W):
         name_w = name_col_width(W)
@@ -734,7 +745,10 @@ class App:
         pad = W - dw(row) - dw(note) - 2
         if pad >= 2:
             return CYAN + BOLD + row + RESET + " " * (pad + 2) + DIM + note + RESET
-        return fit(CYAN + BOLD + row + RESET, W)
+        # 放不下"共 N 项"时不能再对 row 做 fit: row 本来就是 W - RIGHT_MARGIN 宽,
+        # 而 fit 是左对齐"补齐到 W", 会把这一列重新填满并吃掉最右一个字符
+        # (表现为表头比数据行宽 1 列、最右列少一个字)。直接返回即可。
+        return CYAN + BOLD + row + RESET
 
     def row_line(self, r: Proc, name_w, selected):
         cpu_s = f"{r.cpu:.1f}"
@@ -770,9 +784,10 @@ class App:
 
     def build_frame(self, W, H):
         lines = []
+        SW = safe_width(W)   # 所有整行内容用这个宽度, 避免占用最后一列
         if self.detail_lines is not None:
-            lines.append(BOLD + CYAN + fit(f"── {self.detail_title}", W) + RESET)
-            lines.append(DIM + "─" * W + RESET)
+            lines.append(BOLD + CYAN + fit(f"── {self.detail_title}", SW) + RESET)
+            lines.append(DIM + "─" * SW + RESET)
             vw = max(W - 18, 10)
             max_show = H - 3
             for label, val in self.detail_lines:
@@ -788,7 +803,7 @@ class App:
                     if dw(val) <= 0:
                         break
             while len(lines) < max_show:
-                lines.append(" " * W)
+                lines.append(" " * SW)
             lines.append(DIM + "按任意键返回列表" + RESET)
             return lines[:H]
 
@@ -811,8 +826,8 @@ class App:
             lines.append(self.row_line(r, name_w, selected))
         shown = min(len(rows) - self.offset, body_h)
         for _ in range(max(body_h - shown, 0)):
-            lines.append(" " * W)
-        lines.append(self.help_line(W))
+            lines.append(" " * SW)
+        lines.append(self.help_line(SW))
         return lines[:H]
 
     def render(self):
