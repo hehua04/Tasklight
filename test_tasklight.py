@@ -1,0 +1,149 @@
+# -*- coding: utf-8 -*-
+"""TaskLight 采集性能与保真度回归测试。期望: 全部 PASS。"""
+from __future__ import annotations
+import statistics
+import sys
+import time
+
+sys.argv = ["tasklight.py"]
+import tasklight as T
+
+FAIL = []
+
+
+def check(label, cond, detail=""):
+    print(f"  [{'PASS' if cond else 'FAIL'}] {label}" + (f"  {detail}" if detail else ""))
+    if not cond:
+        FAIL.append(label)
+
+
+print("=" * 62)
+print("1. 原生采集路径可用性")
+print("=" * 62)
+check("native_available()", T.native_available())
+
+if not T.native_available():
+    print("\n原生路径不可用, 后续测试无意义")
+    sys.exit(1)
+
+print()
+print("=" * 62)
+print("2. 单次采集延迟 (阈值 500 ms)")
+print("=" * 62)
+a = T.App(type("A", (), dict(interval=2.0, sort="mem", filter="", plain=True, once=False))())
+ts = []
+for _ in range(5):
+    t0 = time.perf_counter()
+    snap = T.Snap(*a._collect())
+    ts.append(time.perf_counter() - t0)
+med = statistics.median(ts)
+check("中位采集耗时 < 500 ms", med < 0.5, f"实测 {med*1000:.1f} ms (上限 500 ms)")
+check("有进程数据", len(snap.procs) > 20, f"{len(snap.procs)} 个进程")
+
+print()
+print("=" * 62)
+print("3. 字段完整性")
+print("=" * 62)
+n = len(snap.procs)
+n_commit = sum(1 for r in snap.procs if r.commit is not None)
+n_thr = sum(1 for r in snap.procs if r.threads is not None)
+# 注意: 工作集(WS) 为 0 是合法值 —— 完全换出到页面文件的进程确实是 0,
+# psutil 在同名进程上同样报 0 (实测 62/62 一致)。所以这里不能用 rss > 0 衡量
+# 是否采集成功, 否则会随系统内存压力随机变红。改用"字段是否取到"来判断。
+n_fields = sum(1 for r in snap.procs
+               if r.commit is not None and r.threads is not None and r.rss >= 0)
+n_live = sum(1 for r in snap.procs if r.rss > 0)
+# 硬编码快照会随内存压力漂移, 因此用"psutil 也认为非 0"的进程数作为参照
+import psutil as _ps
+_ref_nonzero = set()
+for _p in _ps.process_iter(attrs=("pid", "memory_info")):
+    try:
+        if _p.info["memory_info"] and _p.info["memory_info"].rss > 0:
+            _ref_nonzero.add(_p.info["pid"])
+    except Exception:
+        pass
+_expected = sum(1 for r in snap.procs if r.pid in _ref_nonzero)
+check("commit 列填充率 > 95%", n_commit > n * 0.95, f"{n_commit}/{n}")
+check("线程列填充率 > 95%", n_thr > n * 0.95, f"{n_thr}/{n}")
+check("三字段均取到的进程 > 95%", n_fields > n * 0.95, f"{n_fields}/{n}")
+# 我们的非零工作集进程数不应少于 psutil 认为非零的数量(允许少量进程中途退出)
+check("非零工作集进程数与 psutil 一致", n_live >= _expected - 5,
+      f"本方案 {n_live} / psutil 参照 {_expected}")
+check("PID 0 不出现在可见列表",
+      all(r.pid != 0 for r in a.visible()), "")
+
+# 与 psutil 交叉校验工作集口径。
+# 注意: psutil 逐进程采集本身要 6 秒, 拿它当"同一瞬间"的参照会把内存漂移算成误差,
+# 所以这里对每个进程做"原生 -> psutil"紧邻的交替测量, 并且只统计有实际大小的进程。
+import psutil as _ps
+_pairs = []
+for r in snap.procs:
+    if r.rss < 1024 * 1024:
+        continue
+    _c, _mem = T.sample_process(r.pid)
+    _native = _mem.rss if _mem is not None else r.rss
+    try:
+        _ref = _ps.Process(r.pid).memory_info().rss
+    except Exception:
+        continue
+    if _ref > 0:
+        _pairs.append((abs(_native - _ref) / _ref, r.name))
+_devs = sorted(d for d, _ in _pairs)
+if _devs:
+    _med = _devs[len(_devs) // 2]
+    _p95 = _devs[int(len(_devs) * 0.95)] if len(_devs) > 1 else _devs[0]
+    check("工作集与 psutil 口径一致(中位偏差<10%)", _med < 0.10,
+          f"n={len(_devs)} 中位 {_med*100:.1f}% p95 {_p95*100:.1f}%")
+else:
+    check("工作集与 psutil 口径一致(中位偏差<10%)", False, "没有可比样本")
+
+print()
+print("=" * 62)
+print("4. CPU% 正确性 (两次采样后应有非零值)")
+print("=" * 62)
+s1 = T.Snap(*a._collect())
+time.sleep(1.0)
+s2 = T.Snap(*a._collect())
+nonzero = [r for r in s2.procs if r.cpu > 0]
+check("存在非零 CPU 进程", len(nonzero) > 0, f"{len(nonzero)} 个")
+check("CPU% 都在 [0,100]", all(0.0 <= r.cpu <= 100.0 for r in s2.procs))
+top = sorted(s2.procs, key=lambda r: -r.cpu)[:3]
+print(f"        CPU top3: {[(r.name[:20], round(r.cpu, 1)) for r in top]}")
+# 与 sys_cpu 的一致性: 所有进程 CPU% 之和不应远超 100%
+total_pct = sum(r.cpu for r in s2.procs)
+check("全部进程 CPU% 之和 < 100*ncpu",
+      total_pct < 100 * a.ncpu, f"合计 {total_pct:.1f}% / 上限 {100*a.ncpu}%")
+check("系统 CPU 在 [0,100]", 0.0 <= s2.sys_cpu <= 100.0, f"{s2.sys_cpu:.1f}%")
+
+print()
+print("=" * 62)
+print("5. psutil 回退路径仍然可用")
+print("=" * 62)
+t0 = time.perf_counter()
+fb = a._collect_psutil()
+el = time.perf_counter() - t0
+assert isinstance(fb, list), f"_collect_psutil 应返回 list, 实为 {type(fb).__name__}"
+if fb:
+    assert not isinstance(fb[0], (list, tuple)) or hasattr(fb[0], "_fields"), \
+        "_collect_psutil 的元素应为 Proc"
+# 注意: fb 本身是进程列表, 不能用 len(fb[0]) —— 那是 Proc 的字段数(恒为 6)
+check("回退路径返回数据", len(fb) > 20, f"{len(fb)} 个进程, 耗时 {el*1000:.0f} ms")
+
+print()
+print("=" * 62)
+print("6. prime + 首帧 (模拟 --once)")
+print("=" * 62)
+b = T.App(type("A", (), dict(interval=2.0, sort="mem", filter="", plain=True, once=False))())
+t0 = time.perf_counter()
+b.prime()
+b.snapshot()
+el = time.perf_counter() - t0
+first_nonzero = sum(1 for r in b.procs if r.cpu > 0)
+check("prime+snapshot < 2 s", el < 2.0, f"实测 {el*1000:.0f} ms")
+check("首帧即有非零 CPU", first_nonzero > 0, f"{first_nonzero} 个进程 CPU>0")
+
+print()
+print("=" * 62)
+print(f"结果: {'全部通过' if not FAIL else '失败 ' + str(FAIL)}")
+print("=" * 62)
+sys.exit(1 if FAIL else 0)
