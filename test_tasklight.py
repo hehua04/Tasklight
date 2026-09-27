@@ -105,20 +105,23 @@ for _W in (60, 80, 100, 113, 120, 160):
         _layout_fail.append(f"W={_W} PID与名称粘连")
 check("表头与数据行等宽且列分隔正确", not _layout_fail,
       "; ".join(_layout_fail) if _layout_fail else "6 种宽度全部对齐")
-# 内容宽度应为 W - RIGHT_MARGIN, 即右侧留一列, 否则末列字符会被 \r\n 的
-# 自动换行冲掉 (实测表现: 最右一列"永远少一个字", 拉宽窗口也无法解决)
-check("右侧留出安全列 (内容宽 = W - 1)", all(
-    T.dw(a.header_line(len(snap.procs), w)) == w - T.RIGHT_MARGIN
+# 内容宽度应为 safe_width(W) = W - RIGHT_MARGIN, 即右侧留出安全列,
+# 否则末列字符会被 \r\n 的自动换行冲掉
+check("右侧留出安全列 (内容宽 = W - RIGHT_MARGIN)", all(
+    T.dw(a.header_line(len(snap.procs), w)) == T.safe_width(w)
     for w in (80, 100, 113, 120)),
     f"80/100/113/120 均留 {T.RIGHT_MARGIN} 列")
 check("极窄终端下名称列仍有最小宽度", T.name_col_width(10) >= T.MIN_NAME_W,
       f"name_col_width(10)={T.name_col_width(10)}")
-# build_frame 里每一行都不能超过安全宽度, 否则末列会被 \r\n 的自动换行吃掉
+# build_frame 里每一行都不能超过安全宽度, 否则末列会被 \r\n 的自动换行吃掉。
+# 阈值必须用 T.safe_width(_W) 本身, 它带下限 (极窄终端下 >= COL_OTHER+MIN_NAME_W),
+# 不能写成 _W - RIGHT_MARGIN, 否则窄终端下会误报。
 _over = []
 for _W, _H in ((60, 20), (80, 24), (100, 30), (113, 32), (140, 40)):
+    _limit = T.safe_width(_W)
     for _ln in a.build_frame(_W, _H):
-        if T.dw(_ln) > _W - T.RIGHT_MARGIN:
-            _over.append(f"W={_W} 行宽{T.dw(_ln)}")
+        if T.dw(_ln) > _limit:
+            _over.append(f"W={_W} 行宽{T.dw(_ln)}>{_limit}")
 check("整帧所有行都不超过安全宽度", not _over,
       "; ".join(sorted(set(_over))[:4]) if _over else "5 种尺寸全部安全")
 

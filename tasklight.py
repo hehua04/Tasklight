@@ -394,8 +394,11 @@ MIN_NAME_W = 12
 # 右侧安全列: 不要把内容正好铺到终端最后一列。
 # 否则最后那个字符会落在末列上, 紧随其后的 \r\n 触发自动换行并把它冲掉 ——
 # 表现为最右一列"永远少一个字"(例如表头只剩"线"), 而且拉宽窗口也治不好,
-# 因为程序总会重新填满到边界。留 1 列即可规避。
-RIGHT_MARGIN = 1
+# 因为程序总会重新填满到边界。
+#
+# 注意: shutil.get_terminal_size() 报的是**缓冲区**宽度, 有些终端里可见区
+# 比它窄 (滚动条占位等), 因此这里留 3 列余量, 对任何宽度都没有观感损失。
+RIGHT_MARGIN = 3
 
 
 def safe_width(total_width: int) -> int:
@@ -733,6 +736,7 @@ class App:
         return fit(line, safe_width(W))
 
     def header_line(self, rows_n, W):
+        SW = safe_width(W)
         name_w = name_col_width(W)
         cells = []
         for key, label, width, align in COLS:
@@ -742,12 +746,13 @@ class App:
             cells.append(fit(lab, w, align))
         row = " ".join(cells)
         note = f"共 {rows_n} 项"
-        pad = W - dw(row) - dw(note) - 2
-        if pad >= 2:
-            return CYAN + BOLD + row + RESET + " " * (pad + 2) + DIM + note + RESET
-        # 放不下"共 N 项"时不能再对 row 做 fit: row 本来就是 W - RIGHT_MARGIN 宽,
-        # 而 fit 是左对齐"补齐到 W", 会把这一列重新填满并吃掉最右一个字符
-        # (表现为表头比数据行宽 1 列、最右列少一个字)。直接返回即可。
+        # row 本身就是 SW 宽, 因此"共 N 项"要按 SW 反推, 不能按 W ——
+        # 按 W 反推会多算 RIGHT_MARGIN 列, 把这一行顶出安全区。
+        pad = SW - dw(row) - 2
+        if pad >= dw(note):
+            return CYAN + BOLD + row + RESET + " " * (pad - dw(note)) + DIM + note + RESET
+        # 放不下"共 N 项"时不要再做 fit: row 已是 SW 宽, 而 fit 是左对齐"补齐到
+        # 给定宽度", 会把这一列重新填满并吃掉最右一个字符。直接返回即可。
         return CYAN + BOLD + row + RESET
 
     def row_line(self, r: Proc, name_w, selected):
